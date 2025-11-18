@@ -1,5 +1,5 @@
 
-import React, { useState, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 import Papa from 'papaparse';
@@ -13,9 +13,11 @@ import { MembershipDashboard } from './components/MembershipDashboard';
 import { EventsDashboard } from './components/EventsDashboard';
 import { CommunityReport } from './components/CommunityReport';
 import { CommunityUpload } from './components/CommunityUpload';
+import { CloudConnect } from './components/CloudConnect';
 import { useFilters } from './hooks/useFilters';
 import { useCommunityData } from './hooks/useCommunityData';
 import { useDeveloperMetrics } from './hooks/useDeveloperMetrics';
+import { useCloudStorage } from './hooks/useCloudStorage';
 import { DownloadIcon, ShieldExclamationIcon, ChartBarIcon, GlobeIcon, FlagIcon } from './components/icons';
 
 const RapidCompletionReport = ({ developers }: { developers: DeveloperRecord[] }) => {
@@ -177,17 +179,46 @@ const TabButton = ({
 };
 
 function App() {
-  const [developerData, setDeveloperData] = useState<DeveloperRecord[]>([]);
+  const [localDeveloperData, setLocalDeveloperData] = useState<DeveloperRecord[]>([]);
   const [registeredCommunities, setRegisteredCommunities] = useState<string[]>([]);
-  const [communityMetaData, setCommunityMetaData] = useState<Record<string, CommunityMetaData>>({});
+  const [localCommunityMetaData, setLocalCommunityMetaData] = useState<Record<string, CommunityMetaData>>({});
   const [fileUploadError, setFileUploadError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
-  const [events, setEvents] = useState<Event[]>([
+  
+  // Initial mock events for offline mode
+  const [localEvents, setLocalEvents] = useState<Event[]>([
       {id: '1', name: 'Community Leaders Summit', date: '2024-08-15', description: 'Annual summit for all community leaders.', type: 'upcoming', category: 'Summit', communityCode: 'All', link: 'https://meet.google.com'},
       {id: '2', name: 'Q2 Hackathon', date: '2024-06-20', description: 'A week-long virtual hackathon.', type: 'past', category: 'Hackathon', communityCode: 'All', link: ''},
   ]);
 
+  // Cloud Storage Integration
+  const { 
+      isConnected, 
+      connect, 
+      disconnect, 
+      cloudData, 
+      cloudEvents, 
+      cloudMetaData, 
+      isLoading: isCloudLoading, 
+      uploadBatch, 
+      saveCloudEvent, 
+      deleteCloudEvent,
+      updateCloudCommunityMeta 
+  } = useCloudStorage();
+
   const { dateRange, handleDateChange, setInitialDateRange } = useFilters();
+
+  // Determine Source of Truth based on connection status
+  const developerData = isConnected ? cloudData : localDeveloperData;
+  const events = isConnected ? cloudEvents : localEvents;
+  const communityMetaData = isConnected ? cloudMetaData : localCommunityMetaData;
+
+  // Effect: When connecting, if there is data, set initial range if not set
+  useEffect(() => {
+      if (isConnected && cloudData.length > 0 && !dateRange.from) {
+         setInitialDateRange(cloudData);
+      }
+  }, [cloudData, isConnected, setInitialDateRange, dateRange.from]);
 
   // Filter developerData based on the selected dateRange for periodic analysis
   const filteredDeveloperData = useMemo(() => {
@@ -206,51 +237,72 @@ function App() {
 
 
   const handleSaveEvent = (event: Omit<Event, 'id'>, id?: string) => {
-      setEvents(prev => {
-          const updatedEvent = { ...event, date: event.date || new Date().toISOString().split('T')[0] };
-          
-          if (id) {
-              return prev.map(e => e.id === id ? { ...updatedEvent, id } : e);
-          } else {
-              return [...prev, { ...updatedEvent, id: Date.now().toString() }];
-          }
-      });
+      const updatedEvent = { ...event, date: event.date || new Date().toISOString().split('T')[0] };
+
+      if (isConnected) {
+          saveCloudEvent(updatedEvent, id);
+      } else {
+          setLocalEvents(prev => {
+              if (id) {
+                  return prev.map(e => e.id === id ? { ...updatedEvent, id } : e);
+              } else {
+                  return [...prev, { ...updatedEvent, id: Date.now().toString() }];
+              }
+          });
+      }
   };
 
   const handleDeleteEvent = (eventId: string) => {
-      setEvents(prev => prev.filter(e => e.id !== eventId));
+      if (isConnected) {
+          deleteCloudEvent(eventId);
+      } else {
+          setLocalEvents(prev => prev.filter(e => e.id !== eventId));
+      }
   };
 
 
   const handleDataLoaded = useCallback((data: DeveloperRecord[]) => {
-    setDeveloperData(data);
+    if (isConnected) {
+        // Automatically upload to cloud without confirmation for real-time collaboration
+        uploadBatch(data);
+    } else {
+        setLocalDeveloperData(data);
+        setInitialDateRange(data);
+    }
     setFileUploadError(null);
     setActiveTab('dashboard'); 
-    setInitialDateRange(data);
-  }, [setInitialDateRange]);
+  }, [isConnected, uploadBatch, setInitialDateRange]);
 
   const handleCommunityListLoaded = (codes: string[]) => {
       setRegisteredCommunities(codes);
   };
 
   const handleToggleImportant = (communityCode: string) => {
-    setCommunityMetaData(prev => ({
-      ...prev,
-      [communityCode]: {
-        ...prev[communityCode] || { isImportant: false, followUpDate: null },
-        isImportant: !prev[communityCode]?.isImportant,
-      }
-    }));
+    const currentMeta = communityMetaData[communityCode] || { isImportant: false, followUpDate: null };
+    const newMeta = { ...currentMeta, isImportant: !currentMeta.isImportant };
+
+    if (isConnected) {
+        updateCloudCommunityMeta(communityCode, newMeta);
+    } else {
+        setLocalCommunityMetaData(prev => ({
+            ...prev,
+            [communityCode]: newMeta
+        }));
+    }
   };
 
   const handleSetFollowUp = (communityCode: string, date: string) => {
-    setCommunityMetaData(prev => ({
-      ...prev,
-      [communityCode]: {
-        ...prev[communityCode] || { isImportant: false, followUpDate: null },
-        followUpDate: date,
-      }
-    }));
+    const currentMeta = communityMetaData[communityCode] || { isImportant: false, followUpDate: null };
+    const newMeta = { ...currentMeta, followUpDate: date };
+
+    if (isConnected) {
+        updateCloudCommunityMeta(communityCode, newMeta);
+    } else {
+        setLocalCommunityMetaData(prev => ({
+            ...prev,
+            [communityCode]: newMeta
+        }));
+    }
   };
   
   const formatDate = (date: Date | null) => {
@@ -285,14 +337,25 @@ function App() {
         <header className="flex flex-col md:flex-row justify-between items-center space-y-4 md:space-y-0">
           <h1 className="text-3xl font-bold text-brand-text">Hedera Certification Dashboard</h1>
           <div className="flex items-center space-x-4">
+             <CloudConnect onConnect={connect} isConnected={isConnected} onDisconnect={disconnect} />
              <FilterControls dateRange={dateRange} onDateChange={handleDateChange} />
              <ReportGenerator data={processedCommunityData} />
           </div>
         </header>
 
-        <div className="bg-brand-surface p-4 rounded-lg shadow-lg">
+        <div className="bg-brand-surface p-4 rounded-lg shadow-lg relative">
+            {isCloudLoading && (
+                <div className="absolute inset-0 bg-brand-surface/80 z-10 flex items-center justify-center">
+                    <p className="text-brand-primary font-bold animate-pulse">Syncing with Cloud Database...</p>
+                </div>
+            )}
             <FileUpload onDataLoaded={handleDataLoaded} setFileUploadError={setFileUploadError} />
-            {fileUploadError && <p className="text-red-400 mt-2 text-sm">{fileUploadError}</p>}
+            <p className="text-xs text-brand-text-secondary mt-2 text-center">
+                {isConnected 
+                    ? 'Real-time Mode: CSV uploads are automatically synced to the server for collaboration.' 
+                    : 'Offline Mode: Data is local. Connect to Cloud to share and collaborate.'}
+            </p>
+            {fileUploadError && <p className="text-red-400 mt-2 text-sm text-center">{fileUploadError}</p>}
         </div>
 
         {developerData.length > 0 ? (
@@ -378,7 +441,11 @@ function App() {
         ) : (
             <div className="text-center py-16 bg-brand-surface rounded-lg">
                 <h2 className="text-xl font-semibold text-brand-text">Welcome, Community Manager!</h2>
-                <p className="text-brand-text-secondary mt-2">Upload a developer data CSV to begin analyzing community progress.</p>
+                <p className="text-brand-text-secondary mt-2">
+                    {isConnected 
+                        ? 'No data found in the cloud database. Upload a CSV to automatically import and sync data.' 
+                        : 'Upload a developer data CSV to begin, or connect to the cloud for real-time collaboration.'}
+                </p>
             </div>
         )}
 
