@@ -1,4 +1,5 @@
 
+
 import React, { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
@@ -15,6 +16,7 @@ import { CommunityReport } from './components/CommunityReport';
 import { CommunityUpload } from './components/CommunityUpload';
 import { CloudConnect } from './components/CloudConnect';
 import { AdminPanel } from './components/AdminPanel';
+import { CodeManagers } from './components/CodeManagers';
 import { useFilters } from './hooks/useFilters';
 import { useCommunityData } from './hooks/useCommunityData';
 import { useDeveloperMetrics } from './hooks/useDeveloperMetrics';
@@ -155,7 +157,7 @@ const FilterControls = ({
     );
 };
 
-type Tab = 'dashboard' | 'management' | 'email' | 'membership' | 'events' | 'reporting' | 'audits' | 'admin';
+type Tab = 'dashboard' | 'management' | 'email' | 'membership' | 'events' | 'reporting' | 'audits' | 'admin' | 'codes';
 
 const TabButton = ({
   label,
@@ -205,6 +207,7 @@ function App() {
       cloudEvents, 
       cloudMetaData, 
       cloudRegisteredCommunities,
+      mergedCommunityList, // New merged list
       isLoading: isCloudLoading, 
       uploadBatch, 
       saveCloudEvent, 
@@ -212,13 +215,14 @@ function App() {
       updateCloudCommunityMeta,
       saveRegisteredCommunities,
       updateUserRole,
-      updateUserCommunities
+      updateUserCommunities,
+      createManualCommunity,
+      deleteManualCommunity
   } = useCloudStorage();
 
   const { dateRange, handleDateChange, setInitialDateRange } = useFilters();
 
   // Determine Source of Truth based on connection status
-  // NOTE: cloudData is ALREADY FILTERED by the hook based on the user's role!
   const developerData = isConnected ? cloudData : localDeveloperData;
   const events = isConnected ? cloudEvents : localEvents;
   const communityMetaData = isConnected ? cloudMetaData : localCommunityMetaData;
@@ -329,7 +333,6 @@ function App() {
                 </div>
             )}
             
-            {/* FILE UPLOAD: Only show if user has write access or is local */}
             {(isConnected && userProfile?.role !== 'viewer') || !isConnected ? (
                 <>
                     <FileUpload onDataLoaded={handleDataLoaded} setFileUploadError={setFileUploadError} />
@@ -349,7 +352,6 @@ function App() {
             {fileUploadError && <p className="text-red-400 mt-2 text-sm text-center">{fileUploadError}</p>}
         </div>
 
-        {/* MAIN CONTENT AREA - Authorization Check */}
         {hasAccess && developerData.length > 0 ? (
             <div>
                 <div className="border-b border-brand-border">
@@ -361,6 +363,12 @@ function App() {
                         <TabButton label="Events" isActive={activeTab === 'events'} onClick={() => setActiveTab('events')} />
                         <TabButton label="Reporting" isActive={activeTab === 'reporting'} onClick={() => setActiveTab('reporting')} />
                         <TabButton label="Audits & Security" isActive={activeTab === 'audits'} onClick={() => setActiveTab('audits')} />
+                        <TabButton 
+                            label="Code Managers" 
+                            isActive={activeTab === 'codes'} 
+                            onClick={() => setActiveTab('codes')} 
+                            isVisible={!!(isConnected && userProfile?.role === 'super_admin')}
+                        />
                         <TabButton 
                             label="Admin Panel" 
                             isActive={activeTab === 'admin'} 
@@ -380,7 +388,6 @@ function App() {
                                 </p>
                             </div>
                             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                                {/* Only Super Admins or Local can upload global community lists */}
                                 {(!isConnected || userProfile?.role === 'super_admin') && (
                                     <div className="md:col-span-1 relative">
                                         <CommunityUpload onListLoaded={handleCommunityListLoaded} />
@@ -437,6 +444,17 @@ function App() {
                     {activeTab === 'reporting' && <CommunityReport communities={processedCommunityData} allDeveloperData={developerData} dateRange={dateRange} />}
                     {activeTab === 'audits' && <RapidCompletionReport developers={rapidCompletions.developers} />}
                     
+                    {/* Code Managers Tab Content */}
+                    {activeTab === 'codes' && isConnected && userProfile?.role === 'super_admin' && (
+                        <CodeManagers 
+                            communities={mergedCommunityList}
+                            users={allUsers}
+                            onCreateCommunity={createManualCommunity}
+                            onDeleteCommunity={deleteManualCommunity}
+                            onAssignAdmin={updateUserCommunities}
+                        />
+                    )}
+
                     {/* Admin Panel Tab Content */}
                     {activeTab === 'admin' && isConnected && userProfile?.role === 'super_admin' && (
                         <AdminPanel 

@@ -1,4 +1,5 @@
 
+
 // FIX: Define and export all necessary types for the application.
 export interface DeveloperRecord {
   developerId: string;
@@ -57,9 +58,31 @@ export interface EmailTemplate {
     body: string;
 }
 
+export interface Campaign {
+    id: string;
+    name: string;
+    templateName: string;
+    subject: string;
+    targetCommunity: string;
+    targetCount: number;
+    status: 'queued' | 'processing' | 'sent' | 'failed';
+    createdBy: string;
+    createdAt: Date;
+    scheduledFor?: string; // For future scheduling
+}
+
 export interface RegisteredCommunity {
     code: string;
     name?: string;
+}
+
+export interface ManagedCommunity {
+    code: string;
+    name?: string;
+    description?: string;
+    source: 'csv' | 'manual';
+    createdBy?: string;
+    createdAt?: Date;
 }
 
 export type UserRole = 'super_admin' | 'community_admin' | 'viewer';

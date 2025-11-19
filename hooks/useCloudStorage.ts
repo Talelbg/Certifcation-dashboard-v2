@@ -1,9 +1,10 @@
 
+
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { collection, onSnapshot, writeBatch, doc, Timestamp, setDoc, deleteDoc, addDoc, getDoc, updateDoc } from 'firebase/firestore';
+import { collection, onSnapshot, writeBatch, doc, Timestamp, setDoc, deleteDoc, addDoc, getDoc, updateDoc, query, orderBy, limit } from 'firebase/firestore';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { db, auth, googleProvider } from '../firebaseConfig';
-import { DeveloperRecord, Event, CommunityMetaData, UserProfile, UserRole } from '../types';
+import { DeveloperRecord, Event, CommunityMetaData, UserProfile, UserRole, Campaign, ManagedCommunity } from '../types';
 
 export const useCloudStorage = () => {
     const [user, setUser] = useState<User | null>(null);
@@ -15,6 +16,8 @@ export const useCloudStorage = () => {
     const [rawCloudEvents, setRawCloudEvents] = useState<Event[]>([]);
     const [cloudMetaData, setCloudMetaData] = useState<Record<string, CommunityMetaData>>({});
     const [cloudRegisteredCommunities, setCloudRegisteredCommunities] = useState<string[]>([]);
+    const [cloudManagedCommunities, setCloudManagedCommunities] = useState<ManagedCommunity[]>([]); // From Firestore
+    const [cloudCampaigns, setCloudCampaigns] = useState<Campaign[]>([]);
     const [isLoading, setIsLoading] = useState(false);
 
     // --- AUTHENTICATION & PROFILE MANAGEMENT ---
@@ -35,12 +38,6 @@ export const useCloudStorage = () => {
                     setUserProfile(userSnap.data() as UserProfile);
                 } else {
                     // First time login logic
-                    // Check if this is the VERY first user in the system to make them Super Admin automatically
-                    // (Simplified logic for demo purposes - real production apps use Admin SDK scripts)
-                    // Ideally, you'd query the collection size, but we'll check if the allUsers state is empty later or assume viewer.
-                    
-                    // For now, default to 'viewer'. The first manual update in DB makes someone admin, 
-                    // OR specific hardcoded emails could be super_admin.
                     const isFirstUser = false; // Toggle this to true if you want the next login to be admin
                     
                     const newProfile: UserProfile = {
@@ -61,12 +58,13 @@ export const useCloudStorage = () => {
                 setRawCloudData([]);
                 setRawCloudEvents([]);
                 setAllUsers([]);
+                setCloudCampaigns([]);
             }
         });
         return () => unsubscribe();
     }, []);
 
-    // Listener for Profile Updates (e.g., if an admin changes your role while you are logged in)
+    // Listener for Profile Updates
     useEffect(() => {
         if (!user || !db) return;
         const unsub = onSnapshot(doc(db, 'users', user.uid), (doc) => {
@@ -116,8 +114,7 @@ export const useCloudStorage = () => {
 
     // --- DATA SYNCING (SCOPED) ---
 
-    // 1. Subscribe to Developers (Fetch All, Filter in Memory for simplicity in React)
-    // In a high-volume production app, you would use Firestore Queries (where 'communityCode', 'in', allowedCommunities)
+    // 1. Subscribe to Developers
     useEffect(() => {
         if (!db || !user || !userProfile) {
             setRawCloudData([]);
@@ -165,18 +162,53 @@ export const useCloudStorage = () => {
         return () => unsubscribe();
     }, [user, userProfile]);
 
-    // 3. Metadata & Settings
+    // 3. Subscribe to Campaigns (Real Email History)
+    useEffect(() => {
+        if (!db || !user) {
+            setCloudCampaigns([]);
+            return;
+        }
+
+        const q = query(collection(db, 'campaigns'), orderBy('createdAt', 'desc'), limit(50));
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const campaigns: Campaign[] = [];
+            snapshot.forEach((doc) => {
+                const data = doc.data();
+                campaigns.push({
+                    id: doc.id,
+                    ...data,
+                    createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date()
+                } as Campaign);
+            });
+            setCloudCampaigns(campaigns);
+        });
+
+        return () => unsubscribe();
+    }, [user]);
+
+    // 4. Metadata & Managed Communities
     useEffect(() => {
         if (!db || !user) return;
+        
         const unsubMeta = onSnapshot(collection(db, 'community_metadata'), (snap) => {
             const meta: Record<string, CommunityMetaData> = {};
             snap.forEach(d => meta[d.id] = d.data() as CommunityMetaData);
             setCloudMetaData(meta);
         });
+
+        // Legacy list support
         const unsubSettings = onSnapshot(doc(db, 'settings', 'communities'), (snap) => {
             if (snap.exists()) setCloudRegisteredCommunities(snap.data().codes || []);
         });
-        return () => { unsubMeta(); unsubSettings(); };
+
+        // NEW: Managed Communities Collection
+        const unsubManaged = onSnapshot(collection(db, 'managed_communities'), (snap) => {
+            const managed: ManagedCommunity[] = [];
+            snap.forEach(d => managed.push(d.data() as ManagedCommunity));
+            setCloudManagedCommunities(managed);
+        });
+
+        return () => { unsubMeta(); unsubSettings(); unsubManaged(); };
     }, [user]);
 
     // --- AUTHORIZATION & FILTERING LOGIC ---
@@ -187,7 +219,7 @@ export const useCloudStorage = () => {
         if (userProfile.role === 'community_admin') {
             return rawCloudData.filter(d => userProfile.allowedCommunities.includes(d.communityCode));
         }
-        return []; // Viewer sees nothing by default, or you can change this
+        return []; 
     }, [rawCloudData, userProfile]);
 
     const cloudEvents = useMemo(() => {
@@ -201,6 +233,29 @@ export const useCloudStorage = () => {
         return [];
     }, [rawCloudEvents, userProfile]);
 
+    // MERGE: Combine CSV Detected Codes + Manual Codes
+    const mergedCommunityList = useMemo(() => {
+        const map = new Map<string, ManagedCommunity>();
+        
+        // 1. Add Manual Entries from Firestore
+        cloudManagedCommunities.forEach(c => map.set(c.code, c));
+
+        // 2. Detect from CSV Data (Cloud Data)
+        // Only adding if not already present to preserve 'manual' status metadata
+        rawCloudData.forEach(dev => {
+            if (dev.communityCode && !map.has(dev.communityCode)) {
+                map.set(dev.communityCode, {
+                    code: dev.communityCode,
+                    name: dev.communityCode,
+                    source: 'csv',
+                    createdAt: new Date() // Transient
+                });
+            }
+        });
+        
+        return Array.from(map.values()).sort((a, b) => a.code.localeCompare(b.code));
+    }, [cloudManagedCommunities, rawCloudData]);
+
 
     // --- ADMIN ACTIONS ---
 
@@ -212,6 +267,23 @@ export const useCloudStorage = () => {
     const updateUserCommunities = async (uid: string, communities: string[]) => {
         if (!db || userProfile?.role !== 'super_admin') return;
         await updateDoc(doc(db, 'users', uid), { allowedCommunities: communities });
+    };
+
+    const createManualCommunity = async (code: string, name: string, description?: string) => {
+        if (!db || !user || userProfile?.role !== 'super_admin') return;
+        await setDoc(doc(db, 'managed_communities', code), {
+            code,
+            name,
+            description,
+            source: 'manual',
+            createdBy: user.email,
+            createdAt: Timestamp.now()
+        });
+    };
+
+    const deleteManualCommunity = async (code: string) => {
+        if (!db || !user || userProfile?.role !== 'super_admin') return;
+        await deleteDoc(doc(db, 'managed_communities', code));
     };
 
     // --- DATA ACTIONS ---
@@ -227,13 +299,9 @@ export const useCloudStorage = () => {
             for (const chunk of chunks) {
                 const batch = writeBatch(db);
                 chunk.forEach(dev => {
-                    // SECURITY: Community Admin should strictly only upload for their allowed communities.
-                    // This check is UI side; Firestore Security Rules should enforce it server side.
                     if (userProfile?.role === 'community_admin' && !userProfile.allowedCommunities.includes(dev.communityCode)) {
-                        console.warn(`Skipping upload for ${dev.communityCode} - Not permitted.`);
-                        return;
+                        return; 
                     }
-
                     const ref = doc(db, 'developers', dev.developerId);
                     batch.set(ref, {
                         ...dev,
@@ -253,7 +321,6 @@ export const useCloudStorage = () => {
         }
     }, [user, userProfile]);
 
-    // ... (Rest of the actions: saveCloudEvent, deleteCloudEvent etc. remain similar but use db)
     const saveCloudEvent = useCallback(async (event: Omit<Event, 'id'>, id?: string) => {
         if (!db || !user) return;
         try {
@@ -277,6 +344,20 @@ export const useCloudStorage = () => {
         try { await setDoc(doc(db, 'settings', 'communities'), { codes, updatedBy: user.email }); } catch (e) { console.error(e); }
     }, [user]);
 
+    const createEmailCampaign = useCallback(async (campaignData: Omit<Campaign, 'id' | 'createdAt' | 'createdBy'>) => {
+        if (!db || !user) return;
+        try {
+            await addDoc(collection(db, 'campaigns'), {
+                ...campaignData,
+                createdBy: user.email,
+                createdAt: Timestamp.now()
+            });
+        } catch (e) {
+            console.error("Error creating campaign", e);
+            throw e;
+        }
+    }, [user]);
+
     return {
         user,
         userProfile,
@@ -284,10 +365,12 @@ export const useCloudStorage = () => {
         isConnected,
         login,
         logout,
-        cloudData, // This is now SCOPED based on role
-        cloudEvents, // This is now SCOPED based on role
+        cloudData,
+        cloudEvents,
         cloudMetaData,
         cloudRegisteredCommunities,
+        mergedCommunityList, // The unified list of CSV+Manual codes
+        cloudCampaigns,
         isLoading,
         uploadBatch,
         saveCloudEvent,
@@ -295,6 +378,9 @@ export const useCloudStorage = () => {
         updateCloudCommunityMeta,
         saveRegisteredCommunities,
         updateUserRole,
-        updateUserCommunities
+        updateUserCommunities,
+        createManualCommunity,
+        deleteManualCommunity,
+        createEmailCampaign
     };
 };
