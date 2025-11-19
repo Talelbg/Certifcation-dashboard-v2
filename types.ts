@@ -61,3 +61,16 @@ export interface RegisteredCommunity {
     code: string;
     name?: string;
 }
+
+export type UserRole = 'super_admin' | 'community_admin' | 'viewer';
+
+export interface UserProfile {
+    uid: string;
+    email: string;
+    displayName: string;
+    photoURL?: string;
+    role: UserRole;
+    allowedCommunities: string[]; // Array of community codes
+    createdAt: any;
+    lastLogin: any;
+}

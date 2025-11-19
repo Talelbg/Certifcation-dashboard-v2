@@ -159,13 +159,8 @@ export const CommunityReport = ({ communities, allDeveloperData, dateRange }: Co
         setAnalysis(null);
 
         try {
-            // FIX: Safely access process.env to prevent crashes in non-Node environments (browsers)
-            const apiKey = (typeof process !== 'undefined' && process.env) ? process.env.API_KEY : null;
-            
-            if (!apiKey) {
-                throw new Error("API_KEY environment variable not set. Please configure it to use this feature.");
-            }
-            const ai = new GoogleGenAI({ apiKey: apiKey });
+            // FIX: Updated to follow guidelines: Use process.env.API_KEY directly.
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
             
             const prompt = `
                 Generate a comprehensive, analytical community report for "${selectedCommunity.code}" formatted as a professional HTML email.
